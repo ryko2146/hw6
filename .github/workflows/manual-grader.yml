@@ -1,0 +1,174 @@
+name: "👉 Click here to run grader"
+run-name: "Autograder Run"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.actor }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  autograder:
+    name: Grade Homework 6
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    
+    steps:
+      - name: Checkout Student Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment
+        id: setup
+        run: |
+          PY_FILE=$(find . -iname "*.py" | head -1)
+          JL_FILE=$(find . -iname "*.jl" | head -1)
+          M_FILE=$(find . -iname "*.m" | head -1)
+          IPYNB_FILE=$(find . -iname "*.ipynb" | head -1)
+
+          if [ -n "$PY_FILE" ]; then
+            echo "lang=py" >> $GITHUB_OUTPUT
+            pip install numpy
+          elif [ -n "$JL_FILE" ]; then
+            echo "lang=jl" >> $GITHUB_OUTPUT
+            # Julia is pre-installed on ubuntu-latest GitHub runners
+          elif [ -n "$M_FILE" ]; then
+            echo "lang=m" >> $GITHUB_OUTPUT
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends octave
+          elif [ -n "$IPYNB_FILE" ]; then
+            echo "::error::Found a .ipynb file. Please export your code as a script!"
+            echo "lang=ipynb" >> $GITHUB_OUTPUT
+          else
+            echo "lang=none" >> $GITHUB_OUTPUT
+          fi
+
+      # ==========================================
+      # PROBLEM 1: BVP SOLVER & TAPERED FIN
+      # ==========================================
+      - name: Run Problem 1
+        continue-on-error: true
+        env:
+          EXP_T_SOL: "[200.0, 176.7256, 157.5672, 141.9153, 129.2788, 119.2691, 111.5917, 106.0459, 102.5517, 101.3056]"
+        run: |
+          if [ "${{ steps.setup.outputs.lang }}" == "py" ]; then
+            python -c "import sys, textwrap; exec(textwrap.dedent('''
+            import numpy as np, os
+            for r, d, f in os.walk('.'): sys.path.append(r)
+            try:
+                from BVPsolver import BVPsolver
+                x, y = BVPsolver(lambda x: 0*x, lambda x: 0*x-1, lambda x: 0*x, [0, 1], [1, 0, 1], [1, 1, 2*np.exp(1)], 100)
+                open('p1_a', 'w').write('Pass' if np.allclose(y[50], np.exp(x[50]), rtol=0.01) else 'Wrong results (Check Robin BC math)')
+            except Exception as e: open('p1_a', 'w').write(f'Function Error: {type(e).__name__}')
+            try:
+                import fin_BVP as fb
+                EXPECTED = np.array(eval(os.environ['EXP_T_SOL']))
+                if not hasattr(fb, 'T_sol'): open('p1_b', 'w').write('Variable T_sol not found')
+                elif len(fb.T_sol) != 100: open('p1_b', 'w').write(f'Size mismatch: got {len(fb.T_sol)}')
+                elif not np.allclose(np.array(fb.T_sol).flatten()[::11], EXPECTED, rtol=0.01): open('p1_b', 'w').write('T_sol values incorrect (>1% error)')
+                else: open('p1_b', 'w').write('Pass')
+            except Exception as e: open('p1_b', 'w').write(f'Script Error: {type(e).__name__}')
+            '''))"
+          elif [ "${{ steps.setup.outputs.lang }}" == "m" ]; then
+            M_CODE="try
+              addpath(genpath('.'));
+              [x, y] = BVPsolver(@(x)0*x, @(x)0*x-1, @(x)0*x, [0,1], [1,0,1], [1,1,2*exp(1)], 100);
+              if abs(y(50)-exp(x(50))) <= 0.01*abs(exp(x(50))); resA = 'Pass'; else; resA = 'Check Robin BC math'; end
+            catch err; resA = ['Error: ', err.message]; end
+            f=fopen('p1_a','w'); fprintf(f,'%s',resA); fclose(f);
+            try
+              fin_BVP; EXPECTED = str2num(getenv('EXP_T_SOL'));
+              if ~exist('T_sol','var'); resB = 'T_sol not found';
+              elseif length(T_sol) ~= 100; resB = ['Size mismatch: ', num2str(length(T_sol))];
+              else
+                T_test = T_sol(1:11:100);
+                if ~all(abs(T_test(:) - EXPECTED(:)) <= 0.01*abs(EXPECTED(:))); resB = 'Values incorrect (>1% error)';
+                else; resB = 'Pass'; end
+              end
+            catch err; resB = ['Error: ', err.message]; end
+            f=fopen('p1_b','w'); fprintf(f,'%s',resB); fclose(f);"
+            echo "$M_CODE" > grade_p1.m
+            octave --no-gui grade_p1.m || echo "Octave system crash" > p1_a
+          elif [ "${{ steps.setup.outputs.lang }}" == "jl" ]; then
+            julia -e '
+            res_a = try; include(first(filter(f -> endswith(f, "BVPsolver.jl"), vcat(readdir(".", join=true), [joinpath(r, f) for (r, d, files) in walkdir(".") for f in files])))); x, y = BVPsolver(x->0.*x, x->0.*x.-1, x->0.*x, [0.0, 1.0], [1, 0, 1], [1, 1, 2*exp(1)], 100); abs(y[50]-exp(x[50])) <= 0.01*abs(exp(x[50])) ? "Pass" : "Wrong results (Check Robin BC math)"; catch e; "Function error: $(typeof(e))"; end
+            open("p1_a", "w") do f write(f, res_a) end
+            res_b = try; include(first(filter(f -> endswith(f, "fin_BVP.jl"), vcat(readdir(".", join=true), [joinpath(r, f) for (r, d, files) in walkdir(".") for f in files])))); EXPECTED = eval(Meta.parse(get(ENV, "EXP_T_SOL", "[]"))); if !@isdefined(T_sol); "T_sol not found"; elseif length(T_sol) != 100; "Size mismatch"; elseif !all(abs.(vec(T_sol)[1:11:100] .- vec(EXPECTED)) .<= 0.01.*abs.(vec(EXPECTED))); "Values incorrect (>1% error)"; else; "Pass"; end; catch e; "Script error: $(typeof(e))"; end
+            open("p1_b", "w") do f write(f, res_b) end
+            '
+          fi
+
+      # ==========================================
+      # PROBLEM 2: HEAT EQN & BURGER FLIP
+      # ==========================================
+      - name: Run Problem 2
+        continue-on-error: true
+        env:
+          EXP_T_DONE: "[300.0000, 285.4277, 271.3836, 258.3486, 246.7185, 236.7816, 228.7160, 222.6054, 218.4672, 216.2862]"
+        run: |
+          if [ "${{ steps.setup.outputs.lang }}" == "py" ]; then
+            python -c "import sys, textwrap; exec(textwrap.dedent('''
+            import numpy as np, os
+            for r, d, f in os.walk('.'): sys.path.append(r)
+            try:
+                from HeatEqnSolver import HeatEqnSolver
+                x = np.linspace(0,1,10)
+                T = HeatEqnSolver(0, x, np.ones(10), 0.1, 0.2, [1,0,5], [1,0,5])
+                open('p2_a', 'w').write('Pass' if T.shape == (3,10) and abs(T[-1,0] - 5) <= 0.05 else f'Matrix Shape/BC Error')
+            except Exception as e: open('p2_a', 'w').write(f'Function error: {type(e).__name__}')
+            try:
+                import BurgerFlip as bf
+                EXPECTED = np.array(eval(os.environ['EXP_T_DONE']))
+                if not hasattr(bf, 'T_done'): open('p2_b', 'w').write('Variable T_done missing')
+                elif len(bf.T_done) != 40: open('p2_b', 'w').write(f'Size mismatch: {len(bf.T_done)}')
+                elif not np.allclose(np.array(bf.T_done).flatten()[::4], EXPECTED, rtol=0.01): open('p2_b', 'w').write('T_done values incorrect (>1% error)')
+                else: open('p2_b', 'w').write('Pass')
+            except Exception as e: open('p2_b', 'w').write(f'Script error: {type(e).__name__}')
+            '''))"
+          elif [ "${{ steps.setup.outputs.lang }}" == "m" ]; then
+            M_CODE="try
+              addpath(genpath('.'));
+              T = HeatEqnSolver(0, linspace(0,1,10), ones(1,10), 0.1, 0.2, [1,0,5], [1,0,5]);
+              if size(T,1)==3 && abs(T(end,1)-5) <= 0.05; resA = 'Pass'; else; resA = 'Matrix Shape/BC error'; end
+            catch err; resA = ['Error: ', err.message]; end
+            f=fopen('p2_a','w'); fprintf(f,'%s',resA); fclose(f);
+            try
+              BurgerFlip; EXPECTED = str2num(getenv('EXP_T_DONE'));
+              if ~exist('T_done','var'); resB = 'T_done missing';
+              elseif length(T_done) ~= 40; resB = 'Size mismatch';
+              else
+                T_test = T_done(1:4:40);
+                if ~all(abs(T_test(:) - EXPECTED(:)) <= 0.01*abs(EXPECTED(:))); resB = 'Values incorrect (>1% error)';
+                else; resB = 'Pass'; end
+              end
+            catch err; resB = ['Error: ', err.message]; end
+            f=fopen('p2_b','w'); fprintf(f,'%s',resB); fclose(f);"
+            echo "$M_CODE" > grade_p2.m
+            octave --no-gui grade_p2.m || echo "Octave system crash" > p2_a
+          elif [ "${{ steps.setup.outputs.lang }}" == "jl" ]; then
+            julia -e '
+            res_a = try; include(first(filter(f -> endswith(f, "HeatEqnSolver.jl"), vcat(readdir(".", join=true), [joinpath(r, f) for (r, d, files) in walkdir(".") for f in files])))); T = HeatEqnSolver(0.0, collect(range(0,1,length=10)), ones(10), 0.1, 0.2, [1,0,5], [1,0,5]); (size(T,1)==3 && abs(T[end,1]-5) <= 0.05) ? "Pass" : "Matrix Shape/BC error"; catch e; "Function error: $(typeof(e))"; end
+            open("p2_a", "w") do f write(f, res_a) end
+            res_b = try; include(first(filter(f -> endswith(f, "BurgerFlip.jl"), vcat(readdir(".", join=true), [joinpath(r, f) for (r, d, files) in walkdir(".") for f in files])))); EXPECTED = eval(Meta.parse(get(ENV, "EXP_T_DONE", "[]"))); if !@isdefined(T_done); "T_done missing"; elseif length(T_done) != 40; "Size mismatch"; elseif !all(abs.(vec(T_done)[1:4:40] .- vec(EXPECTED)) .<= 0.01.*abs.(vec(EXPECTED))); "Values incorrect (>1% error)"; else; "Pass"; end; catch e; "Script error: $(typeof(e))"; end
+            open("p2_b", "w") do f write(f, res_b) end
+            '
+          fi
+
+      # ==========================================
+      # FINAL REPORT
+      # ==========================================
+      - name: Print Results
+        if: always()
+        run: |
+          P1A=$(cat p1_a 2>/dev/null || echo "Not Run")
+          P1B=$(cat p1_b 2>/dev/null || echo "Not Run")
+          P2A=$(cat p2_a 2>/dev/null || echo "Not Run")
+          P2B=$(cat p2_b 2>/dev/null || echo "Not Run")
+          echo "## Autograder Feedback" >> $GITHUB_STEP_SUMMARY
+          echo "| Problem | Part A (Solver Test) | Part B (Result Check) |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 (BVP) | $P1A | $P1B |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2 (Heat) | $P2A | $P2B |" >> $GITHUB_STEP_SUMMARY
+          if [ "$P1A" != "Pass" ] || [ "$P1B" != "Pass" ] || [ "$P2A" != "Pass" ] || [ "$P2B" != "Pass" ]; then exit 1; fi
